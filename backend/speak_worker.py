@@ -11,7 +11,7 @@ def main():
         return
     text = " ".join(sys.argv[1:])
     engine = pyttsx3.init()
-    engine.setProperty('rate', 165)    # comfortable speaking rate
+    engine.setProperty('rate', 150)    # comfortable speaking rate
     engine.setProperty('volume', 1.0)
     engine.say(text)
     engine.runAndWait()
