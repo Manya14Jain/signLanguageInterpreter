@@ -430,3 +430,5 @@ if st.session_state.run_camera:
         time.sleep(0.005)
 
     cap.release() 
+
+#adi
