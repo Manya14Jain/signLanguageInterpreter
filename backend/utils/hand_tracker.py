@@ -48,21 +48,27 @@ class HandTracker:
             min_hand_detection_confidence=0.60,
             min_hand_presence_confidence=0.60,
             min_tracking_confidence=0.55,
+            running_mode=vision.RunningMode.VIDEO
         )
         self.detector = vision.HandLandmarker.create_from_options(options)
         self._last_results = None
+        self._last_ts_ms = -1
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def process(self, bgr_frame, draw=True):
+    def process(self, bgr_frame, timestamp_ms: int, draw=True):
         """
-        Detect hand landmarks in a BGR frame.
+        Detect hand landmarks in a BGR frame with a given timestamp.
         Returns (annotated_bgr_frame, landmarks_or_None).
-        landmarks is a list of 21 [x, y, z] normalized floats.
         """
+        # Ensure timestamp is strictly increasing for MediaPipe
+        if timestamp_ms <= self._last_ts_ms:
+            timestamp_ms = self._last_ts_ms + 1
+        self._last_ts_ms = timestamp_ms
+
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        self._last_results = self.detector.detect(mp_img)
+        self._last_results = self.detector.detect_for_video(mp_img, timestamp_ms)
 
         landmarks = None
         if self._last_results and self._last_results.hand_landmarks:
@@ -104,8 +110,8 @@ class HandTracker:
 
     # ── Legacy compatibility (used by original app.py) ────────────────────────
 
-    def find_hands(self, img, draw=True):
-        img, _ = self.process(img, draw)
+    def find_hands(self, img, timestamp_ms: int = 0, draw=True):
+        img, _ = self.process(img, timestamp_ms, draw)
         return img
 
     def get_flattened_landmarks(self, img, hand_no=0):

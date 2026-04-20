@@ -307,8 +307,26 @@ with col_panel:
 # ── Camera loop ───────────────────────────────────────────────────────────────
 if st.session_state.run_camera:
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+    # Reduced resolution can also help if latency is high, but 640x480 is standard
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    # State tracking for UI debouncing
+    prev_ui = {
+        'letter': None,
+        'conf_pct': -1,
+        'hold_pct': -1,
+        'fingers': None,
+        'word': st.session_state.current_word
+    }
+
+    frame_count = 0
+    start_time = time.time()
+    last_ts_ms = -1
+
+    # Persistent state for throttled frames
+    last_landmarks = None
+    last_pred = (None, 0.0, {k: False for k in ('thumb','index','middle','ring','pinky')})
 
     while st.session_state.run_camera:
         ok, frame = cap.read()
@@ -316,69 +334,99 @@ if st.session_state.run_camera:
             st.error("❌ Could not read from webcam.")
             break
 
+        frame_count += 1
         frame = cv2.flip(frame, 1)
-        frame, landmarks = tracker.process(frame, draw=True)
-        letter, conf, fs = predictor.predict(landmarks)
+        # Use absolute timestamp; HandTracker ensures monotonicity internally
+        ts_ms = int(time.time() * 1000)
+
+        # THROTTLE: Only run detection every 2nd frame to save CPU
+        should_detect = (frame_count % 2 == 0)  # Throttling logic
+
+        if should_detect:
+            # MediaPipe processing
+            frame, landmarks = tracker.process(frame, timestamp_ms=ts_ms, draw=True)
+            letter, conf, fs = predictor.predict(landmarks)
+            
+            # Save state for skipped frames
+            last_landmarks = landmarks
+            last_pred = (letter, conf, fs)
+        else:
+            # On skipped frames, reuse landmarks to draw overlay
+            landmarks = last_landmarks
+            letter, conf, fs = last_pred
+            if landmarks is not None:
+                tracker._draw_skeleton(frame, landmarks)
 
         hand_visible = landmarks is not None
         if conf < conf_threshold:
             letter = None
 
-        if not hand_visible:
-            h_f, w_f = frame.shape[:2]
-            msg = "Show your hand to the camera"
-            (tw, _), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 1)
-            cv2.putText(frame, msg, ((w_f - tw) // 2, h_f - 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (70, 70, 120), 2, cv2.LINE_AA)
+        # --- UI Updates: Letter ---
+        if letter != prev_ui['letter']:
+            if letter:
+                letter_ph.markdown(f'<div class="letter-display">{letter}</div>', unsafe_allow_html=True)
+            elif not hand_visible:
+                letter_ph.markdown('<div class="letter-nohand">No hand detected</div>', unsafe_allow_html=True)
+            else:
+                letter_ph.markdown('<div class="letter-none">—</div>', unsafe_allow_html=True)
+            prev_ui['letter'] = letter
 
-        # Letter display
-        if letter:
-            letter_ph.markdown(f'<div class="letter-display">{letter}</div>',
-                                unsafe_allow_html=True)
-        elif not hand_visible:
-            letter_ph.markdown('<div class="letter-nohand">No hand detected</div>',
-                               unsafe_allow_html=True)
-        else:
-            letter_ph.markdown('<div class="letter-none">—</div>', unsafe_allow_html=True)
-
-        # Confidence bar
+        # --- UI Updates: Confidence ---
         pct = int(conf * 100)
-        conf_ph.markdown(
-            f'<div class="bar-track"><div class="bar-fill" style="width:{pct}%"></div></div>'
-            f'<p style="color:#6B7280;font-size:.72rem;margin:2px 0 0">{pct}%</p>',
-            unsafe_allow_html=True)
+        if pct != prev_ui['conf_pct']:
+            conf_ph.markdown(
+                f'<div class="bar-track"><div class="bar-fill" style="width:{pct}%"></div></div>'
+                f'<p style="color:#6B7280;font-size:.72rem;margin:2px 0 0">{pct}%</p>',
+                unsafe_allow_html=True)
+            prev_ui['conf_pct'] = pct
 
-        # Finger states
-        render_fingers(
-            fs if fs else {k: False for k in ('thumb','index','middle','ring','pinky')},
-            finger_ph)
+        # --- UI Updates: Fingers ---
+        if fs != prev_ui['fingers']:
+            render_fingers(fs if fs else {k: False for k in ('thumb','index','middle','ring','pinky')}, finger_ph)
+            prev_ui['fingers'] = fs.copy() if isinstance(fs, dict) else fs
 
-        # Hold-to-confirm
+        # --- Hold-to-confirm logic ---
         now = time.time()
         if letter and letter == st.session_state.last_letter:
             if st.session_state.hold_start is None:
                 st.session_state.hold_start = now
-            elapsed  = now - st.session_state.hold_start
+            elapsed = now - st.session_state.hold_start
             progress = min(elapsed / hold_dur, 1.0)
             st.session_state.hold_progress = progress
 
             if progress >= 1.0 and not st.session_state.just_added:
                 st.session_state.current_word += letter
-                st.session_state.hold_start    = None
+                st.session_state.hold_start = None
                 st.session_state.hold_progress = 0.0
-                st.session_state.just_added    = True
+                st.session_state.just_added = True
                 render_word(st.session_state.current_word, word_ph)
+                prev_ui['word'] = st.session_state.current_word
         else:
-            st.session_state.last_letter   = letter
-            st.session_state.hold_start    = None
+            st.session_state.last_letter = letter
+            st.session_state.hold_start = None
             st.session_state.hold_progress = 0.0
-            st.session_state.just_added    = False
+            st.session_state.just_added = False
 
+        # --- UI Updates: Hold Progress ---
         hp = int(st.session_state.hold_progress * 100)
-        hold_ph.markdown(
-            f'<div class="hold-track"><div class="hold-fill" style="width:{hp}%"></div></div>',
-            unsafe_allow_html=True)
+        if hp != prev_ui['hold_pct']:
+            hold_ph.markdown(
+                f'<div class="hold-track"><div class="hold-fill" style="width:{hp}%"></div></div>',
+                unsafe_allow_html=True)
+            prev_ui['hold_pct'] = hp
 
+        # --- Background Tip Message ---
+        if not hand_visible:
+            h_f, w_f = frame.shape[:2]
+            msg = "Show your hand"
+            (tw, _), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            cv2.putText(frame, msg, ((w_f - tw) // 2, h_f - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (70, 70, 120), 1, cv2.LINE_AA)
+
+        # Display the frame (every frame)
         frame_ph.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), use_container_width=True)
 
-    cap.release()
+        # Yield control
+        time.sleep(0.005)
+
+    cap.release() 
