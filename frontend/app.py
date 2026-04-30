@@ -10,11 +10,10 @@ import os
 import sys
 import time
 
-sys.path.append(os.path.join(os.getcwd(), 'backend'))
-from utils.hand_tracker import HandTracker
-from inference import SignLanguagePredictor
-from word_engine import WordEngine
-from tts_engine import TTSEngine
+from backend.utils.hand_tracker import HandTracker
+from backend.inference import SignLanguagePredictor
+from backend.word_engine import WordEngine
+from backend.tts_engine import TTSEngine
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
